@@ -4,6 +4,21 @@
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin for Desktop and `dsh web` on Windows. It adds **WSL folder** to the sidebar's Add workspace button: browse a WSL distribution and add any Linux directory as a workspace in one click. Sidebar terminals of that workspace open inside the distribution, at the matching Linux path.
 
+## Usage
+
+1. Click **"+" (Add workspace)** in the sidebar's workspace header, or Add workspace in the New Session page's workspace picker.
+2. Choose **WSL folder** (Windows folder opens the system chooser as before).
+3. Pick a distribution in the top-right list; it defaults to your default WSL distribution and starts in your home directory.
+4. Click a folder to enter it, a breadcrumb to go back up, or the pencil to type a Linux path and press Enter.
+5. Click **Open** in the target directory. DSH registers it as a workspace and opens a new session.
+
+Tips:
+
+- **Sidebar terminals** in that workspace open the distribution's shell, starting in the workspace.
+- The **agent** reads and writes workspace files through the `\\wsl.localhost` share; for Linux commands ask it to call `wsl.exe -e <command>`, or use the sidebar terminal yourself.
+- "Recent WSL locations" in the first step re-adds a directory in one click.
+- A stopped distribution needs a second or two to boot the first time; the plugin already starts it in the background when the first dialog opens.
+
 ## Features
 
 - **One button, two sources.** The existing "+" in the workspace header (and the workspace picker on the New Session page) first asks for a **Windows folder** (the same system chooser as before) or a **WSL folder**.

@@ -42,6 +42,10 @@ window.__ModuleLoader__.load({
       close: '关闭',
       open: '打开',
       adding: '正在添加…',
+      tipTitle: '使用提示',
+      tipTerminal: 'WSL 工作区里打开的侧栏终端会直接进入发行版，起始目录就是工作区。',
+      tipAgent: 'agent 通过 \\\\wsl.localhost 共享读写文件；需要 Linux 命令时让它调用 wsl.exe。',
+      browseHint: '点文件夹进入下一级，点铅笔可直接输入路径，选好后点「打开」。',
       'error.not-found': '目录不存在',
       'error.denied': '没有权限读取这个目录',
       'error.unreadable': '无法读取这个目录',
@@ -71,6 +75,10 @@ window.__ModuleLoader__.load({
       close: 'Close',
       open: 'Open',
       adding: 'Adding…',
+      tipTitle: 'Tips',
+      tipTerminal: 'Sidebar terminals in a WSL workspace open inside the distribution, starting in the workspace.',
+      tipAgent: 'The agent reads and writes files through the \\\\wsl.localhost share; ask it to call wsl.exe for Linux commands.',
+      browseHint: 'Click a folder to enter it, or the pencil to type a path, then click Open.',
       'error.not-found': 'The directory does not exist',
       'error.denied': 'Permission denied',
       'error.unreadable': 'The directory cannot be read',
@@ -96,7 +104,7 @@ window.__ModuleLoader__.load({
 .dwf-iconbtn:disabled{opacity:.4;cursor:not-allowed}
 .dwf-iconbtn:focus-visible,.dwf-item:focus-visible,.dwf-row:focus-visible,.dwf-crumb:focus-visible,.dwf-btn:focus-visible,.dwf-select:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}
 .dwf-desc{margin:0;padding:0 24px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-secondary)}
-.dwf-menu{display:flex;flex-direction:column;padding:12px 16px 20px}
+.dwf-menu{display:flex;flex-direction:column;padding:12px 16px 12px}
 .dwf-item{display:flex;align-items:center;gap:10px;width:100%;min-height:34px;padding:8px;border:none;border-radius:var(--dsw-radius-md);background:transparent;cursor:pointer;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);text-align:left}
 .dwf-item:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dwf-item:disabled{opacity:.4;cursor:not-allowed}
@@ -108,6 +116,11 @@ window.__ModuleLoader__.load({
 .dwf-item-tag{flex:none;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .dwf-label{padding:6px 8px;margin-top:4px;font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary)}
 .dwf-sep{height:.5px;margin:3px 2px;background:var(--dsw-alias-border-l2)}
+.dwf-tip{display:flex;gap:8px;margin:0 24px 20px;padding:10px 12px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.dwf-tip-icon{flex:none;display:inline-flex;margin-top:1px;color:var(--dsw-alias-label-tertiary)}
+.dwf-tip-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dwf-tip-title{font-weight:500;color:var(--dsw-alias-label-primary)}
+.dwf-hint{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .dwf-error{padding:4px 8px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);word-break:break-word}
 .dwf-browser{width:min(680px,100%);height:min(500px,100dvh - 32px);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}
 .dwf-bhead{border-bottom:.5px solid var(--dsw-alias-border-l3);display:flex;flex-direction:column;flex:none;gap:8px;padding:16px 14px 8px 24px}
@@ -163,6 +176,7 @@ window.__ModuleLoader__.load({
     const IconClose = (size = 16) => svg(size, h('path', { d: 'm4 4 8 8M12 4l-8 8', ...stroke }))
     const IconEdit = (size = 14) => svg(size, h('path', { d: 'M10.5 3.2 12.8 5.5 6 12.3 3.3 12.7 3.7 10z', ...stroke }))
     const IconCheck = (size = 14) => svg(size, h('path', { d: 'm3.5 8.5 3 3 6-7', ...stroke }))
+    const IconInfo = (size = 14) => svg(size, h('circle', { cx: 8, cy: 8, r: 6, ...stroke }), h('path', { d: 'M8 7.2v3.6M8 5.2v.1', ...stroke }))
     const IconClock = (size = 16) => svg(size, h('circle', { cx: 8, cy: 8, r: 5.75, ...stroke }), h('path', { d: 'M8 5v3.2l2 1.3', ...stroke }))
 
     // ── small helpers ──────────────────────────────────────────────────────────────
@@ -376,7 +390,13 @@ window.__ModuleLoader__.load({
         },
         h('span', { className: 'dwf-item-icon' }, IconClock(14)),
         h('span', { className: 'dwf-item-mono' }, entry.path),
-        h('span', { className: 'dwf-item-tag' }, entry.distro)))))
+        h('span', { className: 'dwf-item-tag' }, entry.distro)))),
+      h('div', { className: 'dwf-tip', role: 'note' },
+        h('span', { className: 'dwf-tip-icon' }, IconInfo(14)),
+        h('span', { className: 'dwf-tip-body' },
+          h('span', { className: 'dwf-tip-title' }, t('tipTitle')),
+          h('span', null, t('tipTerminal')),
+          h('span', null, t('tipAgent')))))
     }
 
     function WslBrowser({ t, busy, onBack, onCancel, onPick }) {
@@ -522,7 +542,8 @@ window.__ModuleLoader__.load({
                   type: 'button', className: 'dwf-editzone', 'aria-label': t('editPath'), title: t('editPath'),
                   disabled: busy || !distro,
                   onClick: () => setEditing(current === null ? '/' : current.path === '/' ? '/' : `${current.path}/`),
-                }, IconEdit(14))))),
+                }, IconEdit(14)))),
+          h('p', { className: 'dwf-hint' }, t('browseHint'))),
         h('div', { className: 'dwf-content' },
           error ? h('div', { className: 'dwf-error', role: 'alert' }, describeError(t, error)) : null,
           h('div', { ref: listRef, className: 'dwf-column', role: 'list', 'aria-busy': loading }, body),
