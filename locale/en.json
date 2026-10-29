@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WSL Folder",
+    "description": "Adds \"WSL folder\" to the Add workspace button: browse a WSL distribution and open any Linux directory as a workspace. Sidebar terminals of that workspace open inside the distribution."
+  }
+}

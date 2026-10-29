@@ -1,0 +1,61 @@
+{
+  "name": "dsh-wsl-folder",
+  "version": "1.0.0",
+  "description": "Add a WSL directory as a DeepSeek Harness workspace from the sidebar's Add workspace button, and open that workspace's sidebar terminals inside the distribution.",
+  "type": "module",
+  "license": "MIT",
+  "author": "LyuYuxin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LyuYuxin/dsh-wsl-folder.git"
+  },
+  "homepage": "https://github.com/LyuYuxin/dsh-wsl-folder#readme",
+  "bugs": {
+    "url": "https://github.com/LyuYuxin/dsh-wsl-folder/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "test": "node test/host.test.mjs"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "wsl",
+    "workspace",
+    "windows",
+    "terminal"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.3"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-workspace"]
+    }
+  }
+}
