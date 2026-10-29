@@ -4,6 +4,20 @@
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin for Desktop and `dsh web` on Windows. It adds **WSL folder** to the sidebar's Add workspace button: browse a WSL distribution and add any Linux directory as a workspace in one click. Sidebar terminals of that workspace open inside the distribution, at the matching Linux path.
 
+## Screenshots
+
+**Step 1: choose where the folder is.** Windows folder keeps the system chooser; below are recent WSL locations and usage tips.
+
+![Add workspace: Windows folder or WSL folder](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-1.webp)
+
+**Step 2: browse the distribution.** Switch distributions at the top right, jump through the breadcrumb, or click the pencil to type a path; the footer shows the path that will be registered.
+
+![Select WSL Directory dialog](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-2.webp)
+
+**Then: sidebar terminals open inside the distribution**, titled `WSL · <distro>` and starting in the workspace.
+
+![Sidebar terminal of a WSL workspace](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-3.webp)
+
 ## Usage
 
 1. Click **"+" (Add workspace)** in the sidebar's workspace header, or Add workspace in the New Session page's workspace picker.
@@ -22,9 +36,11 @@ Tips:
 ## Features
 
 - **One button, two sources.** The existing "+" in the workspace header (and the workspace picker on the New Session page) first asks for a **Windows folder** (the same system chooser as before) or a **WSL folder**.
-- **WSL directory browser.** Pick a distribution, jump through the breadcrumb, click the pencil to type a Linux path, show or hide dot directories, then click Open. The directory is registered as a workspace at `\\wsl.localhost\<distro>\...`.
+- **WSL directory browser.** Pick a distribution, jump through the breadcrumb, click the pencil to type a Linux path, show or hide dot directories, then click Open. Linux directories are registered as `\\wsl.localhost\<distro>\...` workspaces.
+- **Windows drives mounted into WSL work too.** Directories under `/mnt/c`, `/mnt/d`, ... (which WSL's `\\wsl.localhost` share cannot serve) are read from the Windows drive directly and registered as their real Windows path (`/mnt/d/proj` → `D:\proj`), so the agent's tools access them natively. The plugin remembers which distribution they were picked from, so their sidebar terminals open in WSL as well.
 - **Recent locations.** WSL directories you added before appear in the first step; one click adds them again.
 - **Terminals open in WSL.** A sidebar terminal in a WSL workspace runs `wsl.exe -d <distro> --cd <linux path>`, the distribution's login shell started in the workspace, titled `WSL · <distro>`. Windows workspaces and the agent's own tools are unaffected.
+- **The agent can write files in WSL workspaces.** DSH's write and edit tools fail on `\\wsl.localhost` (`ENOTSUP` for a new file, `GetFileSecurityW EIO` for an edit) because WSL's 9P share supports neither hard links nor Windows security descriptors. For those paths only, the plugin swaps in equivalent operations the share supports; the write semantics (version guard, no-clobber create, atomic replacement) stay the same.
 - **Fast.** Distributions come from the registry, the home directory from the distribution's `/etc/wsl.conf` and `/etc/passwd`, and listings from the `\\wsl.localhost` share, so nothing on the hot path spawns `wsl.exe` (1–3 s per spawn). Opening the dialog boots the distribution and prefetches the home listing in the background; listings are cached, so stepping back is instant.
 - **Native look.** The dialogs follow the structure and styles of DSH's own Modal, Button, menu items and Select Workspace Directory dialog and use only `--dsw-*` theme tokens, so light/dark themes and skins apply.
 
@@ -49,6 +65,7 @@ Then **quit and restart** DSH completely: the terminal redirect is installed whe
 | Field | Default | Meaning |
 |---|---|---|
 | `terminal` | `true` | Open sidebar terminals of WSL workspaces inside the distribution. `false` keeps DSH's default Windows shell |
+| `write` | `true` | Let the agent's write and edit tools write files on `\\wsl.localhost`. `false` keeps DSH unchanged (writes in WSL workspaces fail) |
 
 Override it in your profile's `cordis.patch.yml`:
 
@@ -62,15 +79,20 @@ Override it in your profile's `cordis.patch.yml`:
 ## How it works
 
 - **Button.** DSH's workspace browser declares a directory-flow slot behind "+" (`sidebar.workspaces.directoryFlow`, and `conversation.hero.workspace.directoryFlow` on the New Session page). This plugin occupies both at a lower priority and draws its dialogs in `shell.overlay`; the Windows choice calls the very same API as DSH's native chooser.
-- **Host routes.** Read-only `GET /dsh-wsl-folder/{distros,home,list,warm}`; cross-site requests are refused.
-- **Terminals.** DSH's terminal controller creates sidebar terminals through `subprocess.spawnTerminal({ argv, cwd })`. Only inside that allocation (tracked with `AsyncLocalStorage`) the plugin checks `cwd`; a `\\wsl.localhost\<distro>\<path>` replaces the shell with `wsl.exe -d <distro> --cd <path>`. Unloading the plugin restores the original methods.
+- **Host routes.** `GET /dsh-wsl-folder/{distros,home,list,warm}` and `POST /dsh-wsl-folder/pick` (JSON body; decides the path to register); cross-site requests are refused.
+- **Windows drives and fallback.** A path on a drive under the automount root (default `/mnt/`, read from `[automount] root` in `/etc/wsl.conf`) is read from the Windows path directly; any other directory the `\\wsl.localhost` share refuses is listed by `find` inside the distribution. Windows-drive folders picked from WSL are remembered in `<DSH home>/dsh-wsl-folder.json`.
+- **Terminals.** DSH's terminal controller creates sidebar terminals through `subprocess.spawnTerminal({ argv, cwd })`. Only inside that allocation (tracked with `AsyncLocalStorage`) the plugin checks `cwd`; a `\\wsl.localhost\<distro>\<path>`, or a directory inside a remembered Windows-drive folder, replaces the shell with `wsl.exe -d <distro> --cd <path>`. Unloading the plugin restores the original methods.
+- **Writes.** DSH's local filesystem (`LocalFileSystem`, which the sandboxed one extends) writes the content to a temp file beside the target and then publishes it: a new file through a hard link (failing if the target appeared meanwhile, so another creator's file is never overwritten), and on Windows an existing file through a security-descriptor copy plus `ReplaceFileW`. The plugin wraps its `writeText` / `editText`: when the target is on `\\wsl.localhost`, that one call uses an exclusive copy (which fails the same way if the target exists) and a `rename` over the file. Other paths go through untouched.
 
 ## Known limitations
 
-- **The agent's tools stay on Windows.** This plugin adds workspaces and redirects sidebar terminals; the agent's shell and file tools still run on Windows and reach files through the `\\wsl.localhost` share, which is slower than native Linux access.
+- **The agent's tools stay on Windows.** This plugin adds workspaces, redirects sidebar terminals and repairs writes on the share; the agent's shell and file tools still run on Windows and reach Linux directories through the `\\wsl.localhost` share, which is slower than native Linux access.
+- **Creating a file on the WSL share is not atomic.** The exclusive copy can briefly expose a partly written new file to other programs (edits of existing files still use an atomic `rename`).
+- **Non-drive directories the share refuses** (restricted permissions, for example) are listed by `find` in the distribution, which takes 1–3 s each time; unreadable ones report a clear permission error.
+- Windows folders added outside this plugin (DSH's own system chooser, for example) are not remembered, so their terminals stay on the Windows shell.
 - **Terminals of a WSL workspace always open in WSL**, even when PowerShell is chosen in the terminal menu. Set `terminal: false` for Windows shells.
 - `DSH_SESSION_ID` is not forwarded into the distribution.
-- The terminal redirect wraps DSH's internal `TerminalController.spawn` and `spawnTerminal`. If DSH changes them, the redirect silently stops (terminals fall back to the Windows shell); adding WSL workspaces keeps working.
+- The terminal redirect and the write repair wrap DSH internals: `TerminalController.spawn`, `spawnTerminal`, and `LocalFileSystem`'s `writeText` / `editText` with its `internals`. If DSH changes them, the affected feature falls back to DSH's own behavior (Windows shell terminals, or failing writes in WSL workspaces); adding WSL workspaces keeps working.
 
 ## Tests
 
@@ -78,7 +100,7 @@ Override it in your profile's `cordis.patch.yml`:
 node test/host.test.mjs
 ```
 
-Pure helpers and the terminal redirect are tested with fakes; on Windows with WSL the routes also run against the real distribution and print timings.
+Pure helpers, the terminal redirect and the write repair are tested with fakes; on Windows with WSL the routes also run against the real distribution (printing timings), and new-file, no-clobber and edit writes are checked on the real 9P share.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-wsl-folder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Add a WSL directory as a DeepSeek Harness workspace from the sidebar's Add workspace button, and open that workspace's sidebar terminals inside the distribution.",
   "type": "module",
   "license": "MIT",
@@ -52,11 +52,15 @@
     "dsh": ">=0.2.1-rc.3"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-workspace"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
     }
   }
 }

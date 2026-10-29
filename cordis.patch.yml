@@ -1,6 +1,8 @@
 - insert:
     - id: dsh-wsl-folder
       name: 'dsh-wsl-folder'
-      # Set `terminal: false` to keep sidebar terminals of WSL workspaces on the Windows shell.
+      # terminal: false keeps sidebar terminals of WSL workspaces on the Windows shell.
+      # write: false leaves the agent's write/edit tools exactly as DSH ships them.
       config:
         terminal: true
+        write: true

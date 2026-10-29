@@ -206,16 +206,23 @@ window.__ModuleLoader__.load({
       writeJson(DISTRO_KEY, entry.distro)
     }
 
-    function toUnc(distro, path) {
-      const rest = path === '/' ? '' : path.replace(/^\/+/, '').split('/').join('\\')
-      return `\\\\wsl.localhost\\${distro}\\${rest}`
-    }
-
     async function getJson(route, params, signal) {
       const query = new URLSearchParams(params || {}).toString()
+      return requestJson(`${ROUTE}/${route}${query ? `?${query}` : ''}`, { headers: { accept: 'application/json' }, signal })
+    }
+
+    function postJson(route, body) {
+      return requestJson(`${ROUTE}/${route}`, {
+        method: 'POST',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    }
+
+    async function requestJson(url, init) {
       let response
       try {
-        response = await fetch(`${ROUTE}/${route}${query ? `?${query}` : ''}`, { headers: { accept: 'application/json' }, signal })
+        response = await fetch(url, init)
       } catch (error) {
         if (error && error.name === 'AbortError') throw error
         throw Object.assign(new Error(String((error && error.message) || error)), { code: 'network' })
@@ -333,8 +340,10 @@ window.__ModuleLoader__.load({
     function PickerFlow({ request, t, nativePick }) {
       const [view, setView] = React.useState('choose')
       const [nativeError, setNativeError] = React.useState(null)
+      const [picking, setPicking] = React.useState(false)
+      const [pickError, setPickError] = React.useState(null)
       const owner = request.owner
-      const busy = request.busy
+      const busy = request.busy || picking
 
       const cancel = () => { if (!busy) owner.current.onCancel() }
       const pickWindows = () => {
@@ -348,15 +357,26 @@ window.__ModuleLoader__.load({
           setNativeError(reason instanceof Error ? reason.message : String(reason))
         })
       }
+      // The Host decides what to register: a \\wsl.localhost path, or the real Windows path of a
+      // folder on a Windows drive mounted into the distribution (/mnt/<drive>/...).
       const pickWsl = (distro, path) => {
-        rememberRecent({ distro, path })
-        owner.current.onPicked(toUnc(distro, path))
+        setPicking(true)
+        setPickError(null)
+        postJson('pick', { distro, path }).then((result) => {
+          rememberRecent({ distro, path })
+          setPicking(false)
+          owner.current.onPicked(result.target)
+        }, (reason) => {
+          setPicking(false)
+          setPickError(reason)
+        })
       }
+      const errorText = pickError ? describeError(t, pickError) : nativeError
 
       // The native chooser is a separate window, exactly as with DSH's own button.
       if (view === 'native') return null
-      if (view === 'wsl') return h(WslBrowser, { t, busy, onBack: () => setView('choose'), onCancel: cancel, onPick: pickWsl })
-      return h(ChooseDialog, { t, busy, nativeError, onWindows: pickWindows, onWsl: () => setView('wsl'), onRecent: pickWsl, onCancel: cancel })
+      if (view === 'wsl') return h(WslBrowser, { t, busy, pickError: pickError ? describeError(t, pickError) : null, onBack: () => { setPickError(null); setView('choose') }, onCancel: cancel, onPick: pickWsl })
+      return h(ChooseDialog, { t, busy, nativeError: errorText, onWindows: pickWindows, onWsl: () => { setPickError(null); setView('wsl') }, onRecent: pickWsl, onCancel: cancel })
     }
 
     function ChooseDialog({ t, busy, nativeError, onWindows, onWsl, onRecent, onCancel }) {
@@ -386,7 +406,7 @@ window.__ModuleLoader__.load({
         recents.length > 0 ? h('div', { className: 'dwf-label' }, t('recent')) : null,
         recents.map((entry) => h('button', {
           key: `${entry.distro}:${entry.path}`, type: 'button', className: 'dwf-item', disabled: busy,
-          title: toUnc(entry.distro, entry.path), onClick: () => onRecent(entry.distro, entry.path),
+          title: `${entry.distro}: ${entry.path}`, onClick: () => onRecent(entry.distro, entry.path),
         },
         h('span', { className: 'dwf-item-icon' }, IconClock(14)),
         h('span', { className: 'dwf-item-mono' }, entry.path),
@@ -399,7 +419,7 @@ window.__ModuleLoader__.load({
           h('span', null, t('tipAgent')))))
     }
 
-    function WslBrowser({ t, busy, onBack, onCancel, onPick }) {
+    function WslBrowser({ t, busy, pickError, onBack, onCancel, onPick }) {
       const cardRef = React.useRef(null)
       const listRef = React.useRef(null)
       const [distros, setDistros] = React.useState(cache.distros)
@@ -546,6 +566,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dwf-hint' }, t('browseHint'))),
         h('div', { className: 'dwf-content' },
           error ? h('div', { className: 'dwf-error', role: 'alert' }, describeError(t, error)) : null,
+          pickError ? h('div', { className: 'dwf-error', role: 'alert' }, pickError) : null,
           h('div', { ref: listRef, className: 'dwf-column', role: 'list', 'aria-busy': loading }, body),
           current && current.truncated ? h('div', { className: 'dwf-status' }, t('truncated', { count: current.entries.length })) : null,
           loading && current !== null ? h('div', { className: 'dwf-float', role: 'status' }, t('loading')) : null),
@@ -555,7 +576,7 @@ window.__ModuleLoader__.load({
             onClick: () => setShowHidden((value) => !value),
           }, showHidden ? IconCheck(14) : null, t('showHidden')),
           h('span', { className: 'dwf-gap' }),
-          current ? h('span', { className: 'dwf-unc', title: current.unc }, busy ? t('adding') : current.unc) : null,
+          current ? h('span', { className: 'dwf-unc', title: current.target ?? current.unc }, busy ? t('adding') : (current.target ?? current.unc)) : null,
           h('button', { type: 'button', className: 'dwf-btn dwf-btn-outline', onClick: onCancel, disabled: busy }, t('cancel')),
           h('button', {
             type: 'button', className: 'dwf-btn dwf-btn-primary', disabled: !canOpen,

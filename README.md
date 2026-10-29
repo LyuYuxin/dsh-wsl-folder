@@ -4,6 +4,20 @@
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）插件，适用于 Windows 上的 Desktop 和 `dsh web`：在侧栏的「添加工作区」按钮里加入 **WSL 文件夹**，浏览 WSL 发行版，把任意 Linux 目录一键添加为工作区；这个工作区的侧栏终端会直接开在发行版里对应的 Linux 路径。
 
+## 截图
+
+**第一步：选择文件夹来源。** 「Windows 文件夹」沿用系统选择器；下方是最近用过的 WSL 位置和使用提示。
+
+![添加工作区：选择 Windows 文件夹或 WSL 文件夹](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-1.webp)
+
+**第二步：浏览 WSL 目录。** 右上角切换发行版，面包屑跳转，铅笔图标直接输入路径，底部显示将要注册的路径。
+
+![选择 WSL 目录对话框](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-2.webp)
+
+**打开后：侧栏终端直接进入发行版**，标签为 `WSL · <发行版>`，起始目录就是工作区。
+
+![WSL 工作区的侧栏终端](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-3.webp)
+
 ## 使用方法
 
 1. 点侧栏工作区标题栏里的 **「+」（添加工作区）**，或新会话页工作区选择器里的「添加工作区」。
@@ -22,9 +36,11 @@
 ## 功能
 
 - **一个按钮、两种来源。** 点工作区标题栏原有的「+」（新会话页的工作区选择器同理），先选 **Windows 文件夹**（与原来一样的系统选择器）或 **WSL 文件夹**。
-- **WSL 目录浏览器。** 选发行版、点面包屑跳转、点铅笔直接输入 Linux 路径、显示或隐藏点目录，最后点「打开」。选中的目录以 `\\wsl.localhost\<发行版>\...` 的形式注册为工作区。
+- **WSL 目录浏览器。** 选发行版、点面包屑跳转、点铅笔直接输入 Linux 路径、显示或隐藏点目录，最后点「打开」。Linux 目录以 `\\wsl.localhost\<发行版>\...` 的形式注册为工作区。
+- **挂载进来的 Windows 盘也能选。** `/mnt/c`、`/mnt/d` 等目录（WSL 的 `\\wsl.localhost` 共享读不了它们）直接读对应的 Windows 盘；选中后注册成真实的 Windows 路径（如 `/mnt/d/proj` → `D:\proj`），agent 的工具可以原生读写。插件会记住它是从哪个发行版选的，所以这个工作区的侧栏终端同样开在 WSL 里。
 - **最近位置。** 用过的 WSL 目录会出现在第一步的列表里，点一下直接添加。
 - **终端开在 WSL 里。** 在 WSL 工作区里打开侧栏终端，得到的是 `wsl.exe -d <发行版> --cd <Linux 路径>`，也就是发行版的登录 shell，起始目录就是工作区；标签名为 `WSL · <发行版>`。Windows 工作区和 agent 自己的工具不受影响。
+- **agent 能在 WSL 工作区里写文件。** DSH 自带的写入和编辑工具在 `\\wsl.localhost` 上会失败（新建文件报 `ENOTSUP`，修改文件报 `GetFileSecurityW EIO`），因为 WSL 的 9P 共享不支持硬链接和 Windows 安全描述符。插件只对这类路径改用共享支持的等价操作，写入行为（版本校验、不覆盖别人新建的文件、原子替换）保持不变。
 - **快。** 发行版列表读注册表，主目录从发行版的 `/etc/wsl.conf` 与 `/etc/passwd` 解析，目录列表走 `\\wsl.localhost` 共享，热路径上不再调用 `wsl.exe`（每次调用要 1–3 秒）。打开对话框时就在后台唤醒发行版并预取主目录，列表结果会缓存，返回上一级时立即显示。
 - **原生外观。** 对话框沿用 DSH 自带 Modal、按钮、菜单项和「选择工作区目录」对话框的结构与样式，只用 `--dsw-*` 主题变量，深浅色主题和皮肤都会跟随。
 
@@ -46,11 +62,12 @@ dsh plugin --profile desktop add dsh-wsl-folder
 
 ## 配置
 
-插件行的 `config` 只有一个字段：
+插件行的 `config` 有两个字段：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `terminal` | `true` | WSL 工作区的侧栏终端是否开在发行版里。设为 `false` 时终端保持 DSH 默认的 Windows shell |
+| `write` | `true` | 是否让 agent 的写入、编辑工具能写 `\\wsl.localhost` 上的文件。设为 `false` 时保持 DSH 原样（在 WSL 工作区里写文件会失败） |
 
 在 profile 的 `cordis.patch.yml` 里覆盖：
 
@@ -64,15 +81,20 @@ dsh plugin --profile desktop add dsh-wsl-folder
 ## 工作原理
 
 - **按钮。** DSH 的工作区浏览器在「+」后面声明了一个目录选择插槽（`sidebar.workspaces.directoryFlow`，新会话页是 `conversation.hero.workspace.directoryFlow`）。本插件以更低的优先级占住这两个插槽，自己的对话框画在 `shell.overlay` 里；选 Windows 文件夹时调用的正是 DSH 原生选择器那一个接口。
-- **Host 路由。** 只读接口 `GET /dsh-wsl-folder/{distros,home,list,warm}`，拒绝跨站请求。
-- **终端。** 侧栏终端由 DSH 的 terminal controller 通过 `subprocess.spawnTerminal({ argv, cwd })` 创建。插件只在「正在分配侧栏终端」这一段调用里（用 `AsyncLocalStorage` 标记）检查 `cwd`：如果是 `\\wsl.localhost\<发行版>\<路径>`，就把 shell 换成 `wsl.exe -d <发行版> --cd <路径>`。插件卸载时恢复原方法。
+- **Host 路由。** `GET /dsh-wsl-folder/{distros,home,list,warm}` 和 `POST /dsh-wsl-folder/pick`（JSON 请求体，决定要注册的路径），都拒绝跨站请求。
+- **Windows 盘与兜底。** 路径落在自动挂载根（默认 `/mnt/`，读 `/etc/wsl.conf` 的 `[automount] root`）下的盘符目录时，直接读 Windows 路径；`\\wsl.localhost` 共享读不了的其他目录，改在发行版里用 `find` 列出。从 WSL 选中的 Windows 盘目录记在 `<DSH 主目录>/dsh-wsl-folder.json`。
+- **终端。** 侧栏终端由 DSH 的 terminal controller 通过 `subprocess.spawnTerminal({ argv, cwd })` 创建。插件只在「正在分配侧栏终端」这一段调用里（用 `AsyncLocalStorage` 标记）检查 `cwd`：如果是 `\\wsl.localhost\<发行版>\<路径>`，或位于记录过的 Windows 盘目录里，就把 shell 换成 `wsl.exe -d <发行版> --cd <路径>`。插件卸载时恢复原方法。
+- **写文件。** DSH 的本地文件系统（`LocalFileSystem`，沙箱版本继承自它）先把内容写进同目录下的临时文件，再「发布」：新建文件用硬链接（目标已存在就失败，避免覆盖别人刚建的文件），在 Windows 上修改文件则先复制安全描述符再调用 `ReplaceFileW`。插件包装它的 `writeText` / `editText`：目标在 `\\wsl.localhost` 上时，这一次调用改用排他复制（同样在目标已存在时失败）和 `rename` 覆盖；其他路径不经过任何改动。
 
 ## 已知限制
 
-- **agent 的工具仍是 Windows 的。** 本插件只管添加工作区和侧栏终端；agent 的 shell 和文件工具照常在 Windows 侧运行，通过 `\\wsl.localhost` 共享访问文件（速度比原生 Linux 慢）。
+- **agent 的工具仍是 Windows 的。** 本插件管添加工作区、侧栏终端和共享上的写入；agent 的 shell 和文件工具照常在 Windows 侧运行，Linux 目录通过 `\\wsl.localhost` 共享访问（速度比原生 Linux 慢）。
+- **WSL 共享上新建文件不是原子的。** 排他复制在极短时间内可能让别的程序看到写了一半的新文件（修改已有文件仍是原子的 `rename`）。
+- **共享读不了的非 Windows 盘目录**（例如权限受限的目录）改由发行版里的 `find` 列出，每次要 1–3 秒；没有读权限时会明确提示。
+- 在插件之外（比如 DSH 自带的系统选择器）直接添加的 Windows 目录不会被记录，它们的终端仍是 Windows shell。
 - **WSL 工作区的终端总是开在 WSL 里**，即使在终端菜单里选了 PowerShell。需要 Windows shell 时把 `terminal` 设为 `false`。
 - 终端里的 `DSH_SESSION_ID` 环境变量不会传进发行版。
-- 终端重定向依赖 DSH 内部的 `TerminalController.spawn` 与 `spawnTerminal` 方法；DSH 改了这两处时重定向会失效（不会报错，终端退回 Windows shell），添加 WSL 工作区仍然可用。
+- 终端重定向和写入修复依赖 DSH 内部的 `TerminalController.spawn`、`spawnTerminal`、`LocalFileSystem` 的 `writeText` / `editText` 与 `internals`；DSH 改了这些地方时对应功能会退回 DSH 原样（终端变回 Windows shell，或在 WSL 工作区写文件再次失败），添加 WSL 工作区仍然可用。
 
 ## 测试
 
@@ -80,7 +102,7 @@ dsh plugin --profile desktop add dsh-wsl-folder
 node test/host.test.mjs
 ```
 
-纯函数和终端重定向用假对象测试；在装有 WSL 的 Windows 上还会对真实发行版跑一遍路由并打印耗时。
+纯函数、终端重定向和写入修复用假对象测试；在装有 WSL 的 Windows 上还会对真实发行版跑一遍路由（打印耗时），并在真实的 9P 共享上验证新建、不覆盖、修改文件。
 
 ## 许可证
 
