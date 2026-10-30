@@ -634,24 +634,44 @@ export function noteWslPath(ctx, kind, value, extra) {
   ctx.logger?.debug?.(`dsh-wsl-folder: ${line.trim()}`)
 }
 
+/** Distributions seen by the last refresh, shared by both repair layers. */
+let knownDistros
+
+/** Refresh the synchronous distribution set the repairs consult. */
+function watchDistros(ctx) {
+  const refresh = () => {
+    listDistros().then((list) => { knownDistros = new Set(list.map((entry) => entry.name.toLowerCase())) },
+      (error) => ctx.logger?.warn?.(`dsh-wsl-folder: could not list distributions: ${String(error)}`))
+  }
+  refresh()
+  const timer = setInterval(refresh, DISTRO_TTL_MS)
+  timer.unref?.()
+  return () => clearInterval(timer)
+}
+
 /**
- * Log every filesystem call that names a WSL share with anything but the two-separator spelling,
- * with the caller's stack, so the component that drops a separator is identified from evidence.
- * Only paths mentioning the share are inspected; every other call passes straight through.
+ * Repair the WSL spelling at the last mile: every Node filesystem call. A component that resolved
+ * the address-derived path itself (`dsh-better-sidebar` reading a document, for instance) already
+ * holds `C:\wsl.localhost\...` by then, which the parsed-path funnel never sees; rewriting here
+ * fixes any caller, and the recording keeps naming the ones that still hand over a wrong spelling.
+ * Only paths naming an installed distribution are touched; everything else passes through.
  */
 export function installWslPathDiagnostics(ctx) {
   if (process.platform !== 'win32') return () => {}
-  const suspicious = /wsl[.$]/i
-  const looksWrong = (value) => typeof value === 'string' && suspicious.test(value) && !value.startsWith('\\\\')
+  // Only a path that *starts* with the share spelling can be repaired; directory names that merely
+  // contain it (a session folder named after its workspace, say) are left alone and not recorded.
+  const badShape = /^(?:[a-zA-Z]:)?[\\/]wsl\.(?:localhost|\$)/i
   const wrap = (target, key) => {
     const original = target[key]
     if (typeof original !== 'function' || original[WRAPPED] === true) return () => {}
     const replacement = function (value, ...rest) {
-      if (looksWrong(value)) {
+      let repaired = value
+      if (typeof value === 'string' && badShape.test(value)) {
+        repaired = repairWslSpelling(value, knownDistros)
         const stack = String(new Error().stack ?? '').split('\n').slice(2, 9).map((row) => row.trim()).join(' | ')
-        noteWslPath(ctx, `call:${key}`, value, stack)
+        noteWslPath(ctx, repaired === value ? `call:${key}` : `lastmile:${key}`, value, stack)
       }
-      return original.call(this, value, ...rest)
+      return original.call(this, repaired, ...rest)
     }
     replacement[WRAPPED] = true
     target[key] = replacement
@@ -666,7 +686,7 @@ export function installWslPathDiagnostics(ctx) {
   // ESM named imports (`import { stat } from 'node:fs/promises'`) bind the original functions;
   // this refreshes them to the patched ones, which is what DSH's own modules use.
   try { syncBuiltinESMExports() } catch (error) { ctx.logger?.warn?.(`dsh-wsl-folder: could not refresh builtin exports: ${String(error)}`) }
-  noteWslPath(ctx, 'diagnostics:installed', process.version)
+  ctx.logger?.info?.('dsh-wsl-folder: WSL paths are repaired for every filesystem call')
   return () => {
     for (const restore of restores.reverse()) restore()
     try { syncBuiltinESMExports() } catch { /* best effort */ }
@@ -685,18 +705,11 @@ export function installWslPathRepair(ctx, fs) {
     ctx.logger?.warn?.('dsh-wsl-folder: the filesystem provider has no resolve(); WSL path repair is off')
     return () => {}
   }
-  // A warmed set keeps the repair synchronous on the request path.
-  let distroNames
-  const refresh = () => {
-    listDistros().then((list) => { distroNames = new Set(list.map((entry) => entry.name.toLowerCase())) }, () => {})
-  }
-  refresh()
-  const timer = setInterval(refresh, DISTRO_TTL_MS)
-  timer.unref?.()
+  const stopWatching = watchDistros(ctx)
   const restores = []
   for (const key of ['resolve', 'lstat']) {
     restores.push(patchMethod(proto, key, (original) => function (value, ...rest) {
-      const fixed = repairWslSpelling(value, distroNames)
+      const fixed = repairWslSpelling(value, knownDistros)
       if (fixed !== value) {
         const stack = String(new Error().stack ?? '').split('\n').slice(2, 8).map((row) => row.trim()).join(' | ')
         noteWslPath(ctx, `repair:${key}`, value, stack)
@@ -706,7 +719,7 @@ export function installWslPathRepair(ctx, fs) {
   }
   ctx.logger?.info?.('dsh-wsl-folder: WSL UNC paths missing a leading separator are repaired on resolve')
   return () => {
-    clearInterval(timer)
+    stopWatching()
     for (const restore of restores.reverse()) restore()
   }
 }
@@ -765,9 +778,8 @@ export function apply(ctx, config = {}) {
     ctx.inject(['fs'], (inner) => {
       inner.effect(() => installWslPathRepair(inner, inner.fs), 'dsh-wsl-folder: WSL path repair')
     })
-  }
-  if (config?.diagnose === true) {
-    ctx.effect(() => installWslPathDiagnostics(ctx), 'dsh-wsl-folder: WSL path diagnostics')
+    // The last mile: any component that resolved the path itself before calling Node's fs.
+    ctx.effect(() => installWslPathDiagnostics(ctx), 'dsh-wsl-folder: WSL filesystem call repair')
   }
 }
 

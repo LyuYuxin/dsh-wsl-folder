@@ -23,9 +23,12 @@ All notable changes to this project are documented here. The format follows
   ones report a short permission error instead of a raw command line.
 - A WSL path that reached the filesystem with only one leading separator resolved to
   `C:\wsl.localhost\...` (a drive-rooted path that cannot exist), so the workspace's `AGENTS.md`
-  was never loaded there. `resolve`/`lstat` now restore the separator for paths naming an installed
-  distribution, whatever produced the short spelling. New `paths` option (default `true`) turns
-  this off.
+  was never loaded there and the Sidebar's document preview failed. The separator is now restored
+  in two places: `resolve`/`lstat` on the filesystem provider, and every Node filesystem call —
+  the latter covers components that resolve the address-derived path themselves before reading
+  (`dsh-better-sidebar` does). Paths naming an installed distribution only; the caller of any
+  remaining wrong spelling is recorded in `<DSH home>/dsh-wsl-folder-diagnostics.log`. New `paths`
+  option (default `true`) turns the repair off.
 
 ### Changed
 
