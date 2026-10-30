@@ -66,6 +66,7 @@ Then **quit and restart** DSH completely: the terminal redirect is installed whe
 |---|---|---|
 | `terminal` | `true` | Open sidebar terminals of WSL workspaces inside the distribution. `false` keeps DSH's default Windows shell |
 | `write` | `true` | Let the agent's write and edit tools write files on `\\wsl.localhost`. `false` keeps DSH unchanged (writes in WSL workspaces fail) |
+| `paths` | `true` | Repair WSL paths that lost their leading separator (see "Path repair" below). `false` keeps DSH unchanged |
 
 Override it in your profile's `cordis.patch.yml`:
 
@@ -83,6 +84,7 @@ Override it in your profile's `cordis.patch.yml`:
 - **Windows drives and fallback.** A path on a drive under the automount root (default `/mnt/`, read from `[automount] root` in `/etc/wsl.conf`) is read from the Windows path directly; any other directory the `\\wsl.localhost` share refuses is listed by `find` inside the distribution. Windows-drive folders picked from WSL are remembered in `<DSH home>/dsh-wsl-folder.json`.
 - **Terminals.** DSH's terminal controller creates sidebar terminals through `subprocess.spawnTerminal({ argv, cwd })`. Only inside that allocation (tracked with `AsyncLocalStorage`) the plugin checks `cwd`; a `\\wsl.localhost\<distro>\<path>`, or a directory inside a remembered Windows-drive folder, replaces the shell with `wsl.exe -d <distro> --cd <path>`. Unloading the plugin restores the original methods.
 - **Writes.** DSH's local filesystem (`LocalFileSystem`, which the sandboxed one extends) writes the content to a temp file beside the target and then publishes it: a new file through a hard link (failing if the target appeared meanwhile, so another creator's file is never overwritten), and on Windows an existing file through a security-descriptor copy plus `ReplaceFileW`. The plugin wraps its `writeText` / `editText`: when the target is on `\\wsl.localhost`, that one call uses an exclusive copy (which fails the same way if the target exists) and a `rename` over the file. Other paths go through untouched.
+- **Path repair.** On Windows a path starting with a single `\` is rooted on the current drive, so `\wsl.localhost\...` resolves to `C:\wsl.localhost\...`, which cannot exist — that is the error raised when a WSL workspace's `AGENTS.md` is read. DSH never produces that spelling itself, so some caller drops the leading separator; the plugin repairs it at the filesystem's one funnel, `resolve` (and `lstat`): a path of one separator plus `wsl.localhost`/`wsl$` plus an installed distribution gets the separator back, everything else passes through.
 
 ## Known limitations
 

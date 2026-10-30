@@ -30,8 +30,9 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
-import { constants as fsConstants } from 'node:fs'
-import { copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import nodeFs, { constants as fsConstants } from 'node:fs'
+import nodeFsPromises, { appendFile, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join, posix, win32 } from 'node:path'
 
@@ -596,6 +597,120 @@ export function findLocalFileSystemProto(fs) {
   return undefined
 }
 
+/**
+ * Restore the leading separator of a WSL UNC path that lost one. Two spellings reach the host:
+ * the file-address grammar (`dsh-resource://file/session/<id>/<path>`) collapses a UNC path's
+ * leading `\\` into one `/`, and by the time such a path has been resolved it has become
+ * `C:\wsl.localhost\...` (drive-rooted, so the drive is the process's current one). Both can only
+ * ever mean the share, so both are restored when the second segment names an installed distro.
+ * @param value - requested path, absolute, relative or unrelated.
+ * @returns the UNC spelling when the value looks like a WSL path missing its leading separator.
+ */
+export function repairWslSpelling(value, distroNames) {
+  if (typeof value !== 'string') return value
+  const match = /^(?:[a-zA-Z]:)?[\\/](wsl\.localhost|wsl\$)([\\/].*)?$/.exec(value)
+  if (match === null) return value
+  const rest = match[2] ?? '\\'
+  if (distroNames !== undefined) {
+    const distro = /^[\\/]([^\\/]+)/.exec(rest)?.[1]
+    if (distro === undefined || !distroNames.has(distro.toLowerCase())) return value
+  }
+  return `\\\\${match[1]}${rest}`
+}
+
+/** The prototype that implements DSH's path resolution: the nearest one owning `resolve`. */
+export function findResolveProto(fs) {
+  for (let proto = Object.getPrototypeOf(fs ?? {}); proto !== null && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+    if (typeof Object.getOwnPropertyDescriptor(proto, 'resolve')?.value === 'function') return proto
+  }
+  return undefined
+}
+
+/** Append one diagnostic line (bounded file) so a mis-spelled WSL path names its caller. */
+export function noteWslPath(ctx, kind, value, extra) {
+  const line = `${new Date().toISOString()} ${kind} ${JSON.stringify(value)}${extra === undefined ? '' : ` ${extra}`}\n`
+  const file = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-wsl-folder-diagnostics.log')
+  appendFile(file, line).catch(() => {})
+  ctx.logger?.debug?.(`dsh-wsl-folder: ${line.trim()}`)
+}
+
+/**
+ * Log every filesystem call that names a WSL share with anything but the two-separator spelling,
+ * with the caller's stack, so the component that drops a separator is identified from evidence.
+ * Only paths mentioning the share are inspected; every other call passes straight through.
+ */
+export function installWslPathDiagnostics(ctx) {
+  if (process.platform !== 'win32') return () => {}
+  const suspicious = /wsl[.$]/i
+  const looksWrong = (value) => typeof value === 'string' && suspicious.test(value) && !value.startsWith('\\\\')
+  const wrap = (target, key) => {
+    const original = target[key]
+    if (typeof original !== 'function' || original[WRAPPED] === true) return () => {}
+    const replacement = function (value, ...rest) {
+      if (looksWrong(value)) {
+        const stack = String(new Error().stack ?? '').split('\n').slice(2, 9).map((row) => row.trim()).join(' | ')
+        noteWslPath(ctx, `call:${key}`, value, stack)
+      }
+      return original.call(this, value, ...rest)
+    }
+    replacement[WRAPPED] = true
+    target[key] = replacement
+    return () => { if (target[key] === replacement) target[key] = original }
+  }
+  const restores = []
+  for (const key of ['stat', 'lstat', 'readFile', 'readdir', 'open', 'access', 'realpath', 'statSync', 'lstatSync', 'readFileSync', 'readdirSync', 'openSync', 'existsSync']) {
+    restores.push(wrap(nodeFs, key))
+    if (key.endsWith('Sync') || key === 'existsSync') continue
+    restores.push(wrap(nodeFsPromises, key))
+  }
+  // ESM named imports (`import { stat } from 'node:fs/promises'`) bind the original functions;
+  // this refreshes them to the patched ones, which is what DSH's own modules use.
+  try { syncBuiltinESMExports() } catch (error) { ctx.logger?.warn?.(`dsh-wsl-folder: could not refresh builtin exports: ${String(error)}`) }
+  noteWslPath(ctx, 'diagnostics:installed', process.version)
+  return () => {
+    for (const restore of restores.reverse()) restore()
+    try { syncBuiltinESMExports() } catch { /* best effort */ }
+  }
+}
+
+/**
+ * Repair the WSL UNC spelling at the one funnel every filesystem consumer goes through, so a
+ * caller that lost a separator (`agent-instructions` walking up from the workspace, for example)
+ * still reaches the real file. Only paths naming an installed distribution are touched.
+ */
+export function installWslPathRepair(ctx, fs) {
+  if (process.platform !== 'win32') return () => {}
+  const proto = findResolveProto(fs)
+  if (proto === undefined) {
+    ctx.logger?.warn?.('dsh-wsl-folder: the filesystem provider has no resolve(); WSL path repair is off')
+    return () => {}
+  }
+  // A warmed set keeps the repair synchronous on the request path.
+  let distroNames
+  const refresh = () => {
+    listDistros().then((list) => { distroNames = new Set(list.map((entry) => entry.name.toLowerCase())) }, () => {})
+  }
+  refresh()
+  const timer = setInterval(refresh, DISTRO_TTL_MS)
+  timer.unref?.()
+  const restores = []
+  for (const key of ['resolve', 'lstat']) {
+    restores.push(patchMethod(proto, key, (original) => function (value, ...rest) {
+      const fixed = repairWslSpelling(value, distroNames)
+      if (fixed !== value) {
+        const stack = String(new Error().stack ?? '').split('\n').slice(2, 8).map((row) => row.trim()).join(' | ')
+        noteWslPath(ctx, `repair:${key}`, value, stack)
+      }
+      return original.call(this, fixed, ...rest)
+    }))
+  }
+  ctx.logger?.info?.('dsh-wsl-folder: WSL UNC paths missing a leading separator are repaired on resolve')
+  return () => {
+    clearInterval(timer)
+    for (const restore of restores.reverse()) restore()
+  }
+}
+
 export function installWslWriteSupport(ctx, fs) {
   if (process.platform !== 'win32') return () => {}
   const proto = findLocalFileSystemProto(fs)
@@ -645,6 +760,14 @@ export function apply(ctx, config = {}) {
     ctx.inject(['fs'], (inner) => {
       inner.effect(() => installWslWriteSupport(inner, inner.fs), 'dsh-wsl-folder: agent writes on the WSL share')
     })
+  }
+  if (config?.paths !== false) {
+    ctx.inject(['fs'], (inner) => {
+      inner.effect(() => installWslPathRepair(inner, inner.fs), 'dsh-wsl-folder: WSL path repair')
+    })
+  }
+  if (config?.diagnose === true) {
+    ctx.effect(() => installWslPathDiagnostics(ctx), 'dsh-wsl-folder: WSL path diagnostics')
   }
 }
 

@@ -21,6 +21,11 @@ All notable changes to this project are documented here. The format follows
   `<DSH home>/dsh-wsl-folder.json`, so sidebar terminals there still open inside the distribution.
 - Other directories the share refuses are listed with `find` inside the distribution; unreadable
   ones report a short permission error instead of a raw command line.
+- A WSL path that reached the filesystem with only one leading separator resolved to
+  `C:\wsl.localhost\...` (a drive-rooted path that cannot exist), so the workspace's `AGENTS.md`
+  was never loaded there. `resolve`/`lstat` now restore the separator for paths naming an installed
+  distribution, whatever produced the short spelling. New `paths` option (default `true`) turns
+  this off.
 
 ### Changed
 

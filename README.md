@@ -62,12 +62,13 @@ dsh plugin --profile desktop add dsh-wsl-folder
 
 ## 配置
 
-插件行的 `config` 有两个字段：
+插件行的 `config` 有三个字段：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `terminal` | `true` | WSL 工作区的侧栏终端是否开在发行版里。设为 `false` 时终端保持 DSH 默认的 Windows shell |
 | `write` | `true` | 是否让 agent 的写入、编辑工具能写 `\\wsl.localhost` 上的文件。设为 `false` 时保持 DSH 原样（在 WSL 工作区里写文件会失败） |
+| `paths` | `true` | 是否修复丢了开头分隔符的 WSL 路径（见下方「路径修复」）。设为 `false` 时保持 DSH 原样 |
 
 在 profile 的 `cordis.patch.yml` 里覆盖：
 
@@ -85,6 +86,7 @@ dsh plugin --profile desktop add dsh-wsl-folder
 - **Windows 盘与兜底。** 路径落在自动挂载根（默认 `/mnt/`，读 `/etc/wsl.conf` 的 `[automount] root`）下的盘符目录时，直接读 Windows 路径；`\\wsl.localhost` 共享读不了的其他目录，改在发行版里用 `find` 列出。从 WSL 选中的 Windows 盘目录记在 `<DSH 主目录>/dsh-wsl-folder.json`。
 - **终端。** 侧栏终端由 DSH 的 terminal controller 通过 `subprocess.spawnTerminal({ argv, cwd })` 创建。插件只在「正在分配侧栏终端」这一段调用里（用 `AsyncLocalStorage` 标记）检查 `cwd`：如果是 `\\wsl.localhost\<发行版>\<路径>`，或位于记录过的 Windows 盘目录里，就把 shell 换成 `wsl.exe -d <发行版> --cd <路径>`。插件卸载时恢复原方法。
 - **写文件。** DSH 的本地文件系统（`LocalFileSystem`，沙箱版本继承自它）先把内容写进同目录下的临时文件，再「发布」：新建文件用硬链接（目标已存在就失败，避免覆盖别人刚建的文件），在 Windows 上修改文件则先复制安全描述符再调用 `ReplaceFileW`。插件包装它的 `writeText` / `editText`：目标在 `\\wsl.localhost` 上时，这一次调用改用排他复制（同样在目标已存在时失败）和 `rename` 覆盖；其他路径不经过任何改动。
+- **路径修复。** Windows 上以单个 `\` 开头的路径是「当前盘根目录」，所以 `\wsl.localhost\...` 会被解析成 `C:\wsl.localhost\...`——一个不可能存在的路径。WSL 工作区里读 `AGENTS.md` 时报的就是这个错。DSH 自身不会生成这种写法，是某处调用链把开头的一个分隔符弄丢了；插件在文件系统唯一的入口 `resolve`（以及 `lstat`）上做修复：只对「开头一个分隔符 + `wsl.localhost`/`wsl$` + 已安装的发行版名」的路径补回分隔符，其他路径原样通过。
 
 ## 已知限制
 
@@ -94,7 +96,7 @@ dsh plugin --profile desktop add dsh-wsl-folder
 - 在插件之外（比如 DSH 自带的系统选择器）直接添加的 Windows 目录不会被记录，它们的终端仍是 Windows shell。
 - **WSL 工作区的终端总是开在 WSL 里**，即使在终端菜单里选了 PowerShell。需要 Windows shell 时把 `terminal` 设为 `false`。
 - 终端里的 `DSH_SESSION_ID` 环境变量不会传进发行版。
-- 终端重定向和写入修复依赖 DSH 内部的 `TerminalController.spawn`、`spawnTerminal`、`LocalFileSystem` 的 `writeText` / `editText` 与 `internals`；DSH 改了这些地方时对应功能会退回 DSH 原样（终端变回 Windows shell，或在 WSL 工作区写文件再次失败），添加 WSL 工作区仍然可用。
+- 终端重定向、写入修复和路径修复依赖 DSH 内部的 `TerminalController.spawn`、`spawnTerminal`、`LocalFileSystem` 的 `writeText` / `editText` / `internals` / `resolve`；DSH 改了这些地方时对应功能会退回 DSH 原样（终端变回 Windows shell、或在 WSL 工作区写文件、读 `AGENTS.md` 再次失败），添加 WSL 工作区仍然可用。
 
 ## 测试
 

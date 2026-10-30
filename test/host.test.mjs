@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import nodePath from 'node:path'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 
@@ -43,6 +44,24 @@ assert.equal(plugin.findFolder(remembered, 'C:\\work'), undefined)
 assert.deepEqual(plugin.wslTargetOf('D:\\work\\sub', remembered), { distro: 'Ubuntu', cd: 'D:\\work\\sub', path: '/mnt/d/work/sub' })
 assert.deepEqual(plugin.wslTargetOf('\\\\wsl.localhost\\U\\home\\me', remembered), { distro: 'U', cd: '/home/me', path: '/home/me' })
 assert.equal(plugin.wslTargetOf('E:\\other', remembered), undefined)
+// A WSL UNC path that lost its leading separator can only mean the share; other paths are untouched.
+const names = new Set(['ubuntu-24.04-e'])
+assert.equal(plugin.repairWslSpelling('\\wsl.localhost\\Ubuntu-24.04-E\\home\\me\\AGENTS.md', names), '\\\\wsl.localhost\\Ubuntu-24.04-E\\home\\me\\AGENTS.md')
+assert.equal(plugin.repairWslSpelling('/wsl.localhost/Ubuntu-24.04-E/home', names), '\\\\wsl.localhost/Ubuntu-24.04-E/home')
+assert.equal(plugin.repairWslSpelling('\\\\wsl.localhost\\Ubuntu-24.04-E\\home', names), '\\\\wsl.localhost\\Ubuntu-24.04-E\\home')
+assert.equal(plugin.repairWslSpelling('\\wsl.localhost\\Other\\x', names), '\\wsl.localhost\\Other\\x')
+assert.equal(plugin.repairWslSpelling('C:\\Users\\me', names), 'C:\\Users\\me')
+assert.equal(plugin.repairWslSpelling('\\Windows\\x', names), '\\Windows\\x')
+assert.equal(plugin.repairWslSpelling('AGENTS.md', names), 'AGENTS.md')
+assert.equal(plugin.repairWslSpelling(undefined, names), undefined)
+assert.equal(plugin.repairWslSpelling('\\wsl$\\Ubuntu-24.04-E', names), '\\\\wsl$\\Ubuntu-24.04-E')
+// The file-address round trip collapses `\\` to one `/`; once resolved it is drive-rooted.
+assert.equal(plugin.repairWslSpelling('/wsl.localhost/Ubuntu-24.04-E/home/me/mr_description.md', names), '\\\\wsl.localhost/Ubuntu-24.04-E/home/me/mr_description.md')
+assert.equal(plugin.repairWslSpelling('C:\\wsl.localhost\\Ubuntu-24.04-E\\home\\me\\mr_description.md', names), '\\\\wsl.localhost\\Ubuntu-24.04-E\\home\\me\\mr_description.md')
+assert.equal(plugin.repairWslSpelling('D:\\wsl.localhost\\Ubuntu-24.04-E\\home', names), '\\\\wsl.localhost\\Ubuntu-24.04-E\\home')
+assert.equal(plugin.repairWslSpelling('C:\\wsl.localhost\\Other\\home', names), 'C:\\wsl.localhost\\Other\\home')
+assert.equal(plugin.repairWslSpelling('C:\\wsl.localhost', names), 'C:\\wsl.localhost')
+assert.equal(plugin.repairWslSpelling('C:\\Users\\me\\wsl.localhost\\x', names), 'C:\\Users\\me\\wsl.localhost\\x')
 console.log('helpers ok')
 
 // ── plugin with fakes ──────────────────────────────────────────────────────────
@@ -213,6 +232,31 @@ if (process.platform === 'win32') {
   await fsp.rm(share, { recursive: true, force: true })
   rmSync(local, { recursive: true, force: true })
   console.log('wsl writes ok')
+
+  // ── WSL path repair ──────────────────────────────────────────────────────────
+  // FakeLocalFs mirrors fs-local's resolve: an absolute path is resolved against the provider cwd,
+  // which turns a single leading separator into a drive-rooted path — the reported failure.
+  class FakeResolvingFs extends FakeLocalFs {
+    async resolve(path, opts) {
+      const cwd = opts?.cwd ?? 'C:\\Users\\me\\proj'
+      return { targetKey: nodePath.win32.resolve(cwd, path), displayPath: path }
+    }
+    async lstat(path, opts) {
+      return { targetKey: nodePath.win32.resolve(opts?.cwd ?? 'C:\\Users\\me\\proj', path) }
+    }
+  }
+  const resolving = new FakeResolvingFs()
+  const broken = '\\wsl.localhost\\Ubuntu-24.04-E\\home\\lvyuxin\\work\\EmbodiedAI\\AGENTS.md'
+  assert.equal((await resolving.resolve(broken)).targetKey, 'C:\\wsl.localhost\\Ubuntu-24.04-E\\home\\lvyuxin\\work\\EmbodiedAI\\AGENTS.md', 'the reported path reproduces without the repair')
+  const repairDispose = plugin.installWslPathRepair({ logger: {} }, resolving)
+  await new Promise((r) => setTimeout(r, 300)) // the repair warms its distribution list
+  assert.equal((await resolving.resolve(broken)).targetKey, `\\\\wsl.localhost\\Ubuntu-24.04-E\\home\\lvyuxin\\work\\EmbodiedAI\\AGENTS.md`)
+  assert.equal((await resolving.lstat(broken)).targetKey, `\\\\wsl.localhost\\Ubuntu-24.04-E\\home\\lvyuxin\\work\\EmbodiedAI\\AGENTS.md`)
+  assert.equal((await resolving.resolve('C:\\Users\\me\\x')).targetKey, 'C:\\Users\\me\\x', 'ordinary paths pass through')
+  assert.equal((await resolving.resolve('\\wsl.localhost\\NoSuchDistro\\x')).targetKey, 'C:\\wsl.localhost\\NoSuchDistro\\x', 'unknown distributions are left alone')
+  repairDispose()
+  assert.equal((await resolving.resolve(broken)).targetKey, 'C:\\wsl.localhost\\Ubuntu-24.04-E\\home\\lvyuxin\\work\\EmbodiedAI\\AGENTS.md', 'disposal restores resolve')
+  console.log('wsl path repair ok')
 }
 
 // disposal restores both prototypes and removes the routes

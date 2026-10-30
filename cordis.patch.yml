@@ -3,6 +3,11 @@
       name: 'dsh-wsl-folder'
       # terminal: false keeps sidebar terminals of WSL workspaces on the Windows shell.
       # write: false leaves the agent's write/edit tools exactly as DSH ships them.
+      # paths: false disables the repair of WSL paths that lost a leading separator.
+      # diagnose: true records every filesystem call that names the WSL share with a wrong
+      # spelling, plus its caller stack, in <DSH home>/dsh-wsl-folder-diagnostics.log.
       config:
         terminal: true
         write: true
+        paths: true
+        diagnose: true
