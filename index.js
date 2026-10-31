@@ -30,8 +30,9 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import nodeFs, { constants as fsConstants } from 'node:fs'
-import nodeFsPromises, { appendFile, copyFile, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import nodeFsPromises, { appendFile, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { syncBuiltinESMExports } from 'node:module'
 import { homedir } from 'node:os'
 import { dirname, join, posix, win32 } from 'node:path'
@@ -41,11 +42,13 @@ export const name = 'dsh-wsl-folder'
 const ROUTE = '/dsh-wsl-folder'
 const UNC_HOST = 'wsl.localhost'
 const MAX_ENTRIES = 2000
-const DISTRO_NAME = /^[A-Za-z0-9._-]{1,128}$/
+// A distribution name is one path segment of a UNC share and one argv of `wsl.exe`; `.`/`..` are
+// legal characters but can never name a distribution, and would turn the path into traversal.
+const DISTRO_NAME = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,128}$/
 const DISTRO_TTL_MS = 30_000
 const LXSS_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss'
 
-class RouteError extends Error {
+export class RouteError extends Error {
   constructor(code, message, status = 200) {
     super(message)
     this.code = code
@@ -63,7 +66,8 @@ export function parseWslUnc(value) {
   const match = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/]([^\\/]+)(?:[\\/](.*))?$/i.exec(plain)
   if (match === null || !DISTRO_NAME.test(match[1])) return undefined
   const rest = (match[2] ?? '').split(/[\\/]+/).filter(Boolean)
-  return { distro: match[1], path: `/${rest.join('/')}` }
+  // Collapse `.`/`..`/duplicate separators: a UNC cwd and a Linux path must agree segment for segment.
+  return { distro: match[1], path: rest.length === 0 ? '/' : posix.normalize(`/${rest.join('/')}`) }
 }
 
 export function toUnc(distro, linuxPath) {
@@ -93,9 +97,13 @@ function wslExe() {
 // ── process helpers ────────────────────────────────────────────────────────────
 
 /** wsl.exe prints UTF-16LE unless WSL_UTF8 is honoured; accept both. */
-function decode(buffer) {
+export function decode(buffer) {
   if (!buffer || buffer.length === 0) return ''
-  const text = buffer.includes(0) ? buffer.toString('utf16le') : buffer.toString('utf8')
+  // A UTF-16LE BOM is decisive; text without ASCII (a Chinese-only message, say) has no NUL byte
+  // to detect, so the BOM check has to come before the zero-byte heuristic.
+  const text = buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE
+    ? buffer.toString('utf16le')
+    : buffer.includes(0) ? buffer.toString('utf16le') : buffer.toString('utf8')
   return text.replace(/^\uFEFF/, '')
 }
 
@@ -126,7 +134,7 @@ export function parseLxss(text) {
   const distros = []
   for (const block of text.split(/\r?\n(?=HKEY_)/)) {
     const guid = /\\Lxss\\(\{[^}]+\})/i.exec(block)?.[1]?.toLowerCase()
-    const distroName = /DistributionName\s+REG_SZ\s+(\S+)/i.exec(block)?.[1]
+    const distroName = /DistributionName\s+REG_SZ\s+([^\r\n]+)/i.exec(block)?.[1]?.trim()
     if (guid === undefined || distroName === undefined || !DISTRO_NAME.test(distroName)) continue
     const version = Number.parseInt(/\bVersion\s+REG_DWORD\s+(0x[0-9a-f]+)/i.exec(block)?.[1] ?? '0x2', 16)
     const uid = Number.parseInt(/DefaultUid\s+REG_DWORD\s+(0x[0-9a-f]+)/i.exec(block)?.[1] ?? '0x0', 16)
@@ -163,15 +171,28 @@ function listDistros() {
 
 const homeCache = new Map()
 
+/** INI comment stripping that respects quoted values (`command = "a; b"` keeps the semicolon). */
+function stripIniComment(line) {
+  let quoted = false
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '"') quoted = !quoted
+    else if (!quoted && (char === '#' || char === ';')) return line.slice(0, index)
+  }
+  return line
+}
+
 /** One `key = value` from an INI-style /etc/wsl.conf section, when present. */
 export function wslConfValue(text, wantedSection, wantedKey) {
+  const sectionWanted = String(wantedSection ?? '').trim().toLowerCase()
+  const keyWanted = String(wantedKey ?? '').trim().toLowerCase()
   let section = ''
   for (const raw of String(text ?? '').split(/\r?\n/)) {
-    const line = raw.replace(/[#;].*$/, '').trim()
+    const line = stripIniComment(raw).trim()
     const header = /^\[(.+)\]$/.exec(line)
     if (header !== null) { section = header[1].trim().toLowerCase(); continue }
     const pair = /^([\w.-]+)\s*=\s*"?([^"]*?)"?\s*$/.exec(line)
-    if (section === wantedSection && pair !== null && pair[1].toLowerCase() === wantedKey) return pair[2]
+    if (section === sectionWanted && pair !== null && pair[1].toLowerCase() === keyWanted) return pair[2]
   }
   return undefined
 }
@@ -182,12 +203,18 @@ export function wslConfDefaultUser(text) {
   return user === undefined || user === '' ? undefined : user
 }
 
+/** Normalize an automount root to `/x/`; WSL's default (an empty setting) is `/mnt/`. */
+function normalizeAutomountRoot(value) {
+  const raw = String(value ?? '').trim()
+  if (raw === '') return '/mnt/'
+  const trimmed = raw.replace(/\/+$/, '')
+  return `${trimmed.startsWith('/') ? '' : '/'}${trimmed}/`.replace(/\/+/g, '/')
+}
+
 /** `[automount] root=` from /etc/wsl.conf, normalized to `/x/`; WSL's default is `/mnt/`. */
 export function wslConfAutomountRoot(text) {
   const root = wslConfValue(text, 'automount', 'root')
-  if (root === undefined || root.trim() === '') return '/mnt/'
-  const trimmed = root.trim().replace(/\/+$/, '')
-  return `${trimmed.startsWith('/') ? '' : '/'}${trimmed}/`.replace(/\/+/g, '/')
+  return normalizeAutomountRoot(root)
 }
 
 /**
@@ -195,7 +222,7 @@ export function wslConfAutomountRoot(text) {
  * automount root). Returns undefined for any other Linux path.
  */
 export function drvfsWindowsPath(linuxPath, root = '/mnt/') {
-  const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const escaped = normalizeAutomountRoot(root).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const match = new RegExp(`^${escaped}([a-zA-Z])(?:/(.*))?$`).exec(linuxPath)
   if (match === null) return undefined
   const rest = (match[2] ?? '').split('/').filter(Boolean).join('\\')
@@ -340,29 +367,77 @@ function memoryFile() {
 const folderKey = (windowsPath) => win32.normalize(windowsPath).replace(/\\+$/, '').toLowerCase()
 
 let folders // Map<folderKey, { distro, path, target }>, loaded once
+let foldersLoading
+
+/**
+ * A remembered Linux path, normalized; undefined when it cannot be trusted. The file lives in
+ * <DSH home>, so a hand-edited or stale entry must not smuggle `..`/NUL/backslashes into a
+ * terminal's `--cd` argument.
+ */
+function rememberedLinuxPath(value) {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.includes('\0') || value.includes('\\')) return undefined
+  const segments = value.split('/').filter(Boolean)
+  if (segments.includes('..')) return undefined
+  const normalized = posix.normalize(`/${segments.join('/')}`)
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : '/'
+}
+
+/** A remembered entry is trusted only when every field has the shape the terminal redirect uses. */
+function rememberedEntry(entry) {
+  if (typeof entry?.target !== 'string' || !/^[a-zA-Z]:[\\/]/.test(entry.target) || entry.target === '') return undefined
+  if (!DISTRO_NAME.test(entry?.distro ?? '')) return undefined
+  const path = rememberedLinuxPath(entry?.path)
+  return path === undefined ? undefined : { distro: entry.distro, path, target: entry.target }
+}
 
 async function loadFolders() {
   if (folders !== undefined) return folders
-  folders = new Map()
-  try {
-    const saved = JSON.parse(await readFile(memoryFile(), 'utf8'))
-    for (const entry of Array.isArray(saved?.folders) ? saved.folders : []) {
-      if (typeof entry?.target === 'string' && DISTRO_NAME.test(entry?.distro ?? '')) folders.set(folderKey(entry.target), entry)
+  // Keep one shared load: assigning the empty map before the read let a second caller see an
+  // empty map and overwrite the file with it before the first read finished.
+  if (foldersLoading !== undefined) return foldersLoading
+  foldersLoading = (async () => {
+    const map = new Map()
+    try {
+      const saved = JSON.parse(await readFile(memoryFile(), 'utf8'))
+      for (const raw of Array.isArray(saved?.folders) ? saved.folders : []) {
+        const entry = rememberedEntry(raw)
+        if (entry !== undefined) map.set(folderKey(entry.target), entry)
+      }
+    } catch {
+      // No memory yet.
     }
-  } catch {
-    // No memory yet.
+    folders = map
+    return map
+  })()
+  try {
+    return await foldersLoading
+  } finally {
+    foldersLoading = undefined
   }
-  return folders
 }
 
-async function rememberFolder(entry) {
+/** One serialized writer: concurrent picks would otherwise race on the temp name and the rename. */
+let folderWrite = Promise.resolve()
+
+/** Test seam: remember one Windows-drive folder (production callers reach it through `pick`). */
+export async function rememberFolder(entry) {
+  const remembered = rememberedEntry(entry)
+  if (remembered === undefined) throw new RouteError('bad-path', 'invalid remembered folder', 400)
   const map = await loadFolders()
-  map.set(folderKey(entry.target), entry)
-  const file = memoryFile()
-  await mkdir(dirname(file), { recursive: true })
-  const temp = `${file}.${process.pid}.tmp`
-  await writeFile(temp, `${JSON.stringify({ version: 1, folders: [...map.values()] }, null, 2)}\n`, 'utf8')
-  await rename(temp, file)
+  map.set(folderKey(remembered.target), remembered)
+  const write = folderWrite.catch(() => {}).then(async () => {
+    const file = memoryFile()
+    await mkdir(dirname(file), { recursive: true })
+    const temp = `${file}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temp, `${JSON.stringify({ version: 1, folders: [...map.values()] }, null, 2)}\n`, 'utf8')
+      await rename(temp, file)
+    } finally {
+      await rm(temp, { force: true }).catch(() => {})
+    }
+  })
+  folderWrite = write
+  return write
 }
 
 /** The remembered WSL folder containing `cwd` (the workspace itself or a directory below it). */
@@ -449,10 +524,29 @@ function readJsonBody(request) {
   })
 }
 
-async function serve(request, response, route) {
+/** The connection's peer address, when the request carries a Node socket. */
+function remoteAddressOf(request) {
+  const socket = request?.socket ?? request?.connection
+  return typeof socket?.remoteAddress === 'string' ? socket.remoteAddress : undefined
+}
+
+/** True for an IPv4 or IPv6 loopback peer (IPv4-mapped addresses included); anything else is remote. */
+export function isLoopbackAddress(address) {
+  if (typeof address !== 'string') return false
+  const normalized = address.trim().toLowerCase().replace(/^::ffff:/, '')
+  return normalized === '::1' || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+}
+
+export async function serve(request, response, route, { platform = process.platform, allowRemote = false } = {}) {
   if (request.method !== route.method) {
     response.writeHead(405, { allow: route.method })
     response.end()
+    return
+  }
+  // These routes browse the host and can boot distributions; the web server may listen beyond
+  // loopback, so refuse every non-loopback peer unless the plugin row set `remote: true`.
+  if (!allowRemote && !isLoopbackAddress(remoteAddressOf(request))) {
+    answer(response, 403, { error: 'forbidden', message: 'only loopback clients may use the WSL routes (set remote: true in the plugin config to allow remote clients)' })
     return
   }
   // Browsers mark cross-site requests; only this page (or a direct navigation) may use the routes.
@@ -466,7 +560,7 @@ async function serve(request, response, route) {
     answer(response, 415, { error: 'bad-request', message: 'expected application/json' })
     return
   }
-  if (process.platform !== 'win32') {
+  if (platform !== 'win32') {
     answer(response, 200, { error: 'unsupported', message: 'WSL is only available on a Windows host' })
     return
   }
@@ -481,7 +575,7 @@ async function serve(request, response, route) {
   }
 }
 
-const routes = {
+export const routes = {
   distros: { method: 'GET', handle: async () => ({ distros: (await listDistros()).map(({ uid: _uid, ...rest }) => rest) }) },
   home: { method: 'GET', handle: async (query) => ({ home: await homeOf(requireDistro(query.get('distro'))) }) },
   list: { method: 'GET', handle: async (query) => listDirectory(requireDistro(query.get('distro')), requireLinuxPath(query.get('path') ?? '/')) },
@@ -503,7 +597,7 @@ function isWslLauncher(path) {
  * Replace `owner[key]` with `wrap(original)` and return the restoring disposer. The disposer
  * leaves a later replacement by someone else in place.
  */
-function patchMethod(owner, key, wrap) {
+export function patchMethod(owner, key, wrap) {
   const original = owner[key]
   if (typeof original !== 'function' || original[WRAPPED] === true) return () => {}
   const replacement = wrap(original)
@@ -626,12 +720,34 @@ export function findResolveProto(fs) {
   return undefined
 }
 
-/** Append one diagnostic line (bounded file) so a mis-spelled WSL path names its caller. */
+const DIAGNOSTICS_MAX_BYTES = 256 * 1024
+
+/** One serialized, size-bounded writer so a long-lived Host cannot fill the disk with diagnostics. */
+let diagnosticsQueue = Promise.resolve()
+
+/**
+ * Append one diagnostic line (bounded file) so a mis-spelled WSL path names its caller.
+ * @returns a promise settling after this line was written or dropped, for tests.
+ */
 export function noteWslPath(ctx, kind, value, extra) {
   const line = `${new Date().toISOString()} ${kind} ${JSON.stringify(value)}${extra === undefined ? '' : ` ${extra}`}\n`
   const file = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'dsh-wsl-folder-diagnostics.log')
-  appendFile(file, line).catch(() => {})
+  diagnosticsQueue = diagnosticsQueue.then(async () => {
+    try {
+      // Checked on every write so the file size stays bounded by roughly the threshold.
+      const info = await stat(file).catch(() => undefined)
+      if (info !== undefined && info.size > DIAGNOSTICS_MAX_BYTES) {
+        // Rotate to one previous file; Windows rejects rename over an existing target.
+        await rm(`${file}.1`, { force: true }).catch(() => {})
+        await rename(file, `${file}.1`).catch(() => {})
+      }
+      await appendFile(file, line)
+    } catch {
+      // Diagnostics are best effort; never fail a filesystem call for them.
+    }
+  }).catch(() => {})
   ctx.logger?.debug?.(`dsh-wsl-folder: ${line.trim()}`)
+  return diagnosticsQueue
 }
 
 /** Distributions seen by the last refresh, shared by both repair layers. */
@@ -698,18 +814,21 @@ export function installWslPathDiagnostics(ctx) {
  * caller that lost a separator (`agent-instructions` walking up from the workspace, for example)
  * still reaches the real file. Only paths naming an installed distribution are touched.
  */
-export function installWslPathRepair(ctx, fs) {
+export function installWslPathRepair(ctx, fs, { distroNames } = {}) {
   if (process.platform !== 'win32') return () => {}
   const proto = findResolveProto(fs)
   if (proto === undefined) {
     ctx.logger?.warn?.('dsh-wsl-folder: the filesystem provider has no resolve(); WSL path repair is off')
     return () => {}
   }
-  const stopWatching = watchDistros(ctx)
+  // The live refresh is what production relies on; a fixed set keeps the repair unit-testable
+  // without a WSL installation.
+  const stopWatching = distroNames === undefined ? watchDistros(ctx) : () => {}
+  const names = () => distroNames ?? knownDistros
   const restores = []
   for (const key of ['resolve', 'lstat']) {
     restores.push(patchMethod(proto, key, (original) => function (value, ...rest) {
-      const fixed = repairWslSpelling(value, knownDistros)
+      const fixed = repairWslSpelling(value, names())
       if (fixed !== value) {
         const stack = String(new Error().stack ?? '').split('\n').slice(2, 8).map((row) => row.trim()).join(' | ')
         noteWslPath(ctx, `repair:${key}`, value, stack)
@@ -754,11 +873,12 @@ export function installWslWriteSupport(ctx, fs) {
 export const inject = ['webServer']
 
 export function apply(ctx, config = {}) {
+  const allowRemote = config?.remote === true
   for (const [key, route] of Object.entries(routes)) {
     ctx.effect(() => ctx.webServer.register({
       kind: 'exact',
       path: `${ROUTE}/${key}`,
-      handler: (request, response) => serve(request, response, route),
+      handler: (request, response) => serve(request, response, route, { allowRemote }),
     }), `dsh-wsl-folder: ${key} route`)
   }
   if (config?.terminal !== false) {
@@ -786,7 +906,12 @@ export function apply(ctx, config = {}) {
 /** Test seam: forget cached state so a test can point the memory file elsewhere. */
 export function resetForTests() {
   folders = undefined
+  foldersLoading = undefined
+  folderWrite = Promise.resolve()
   confCache.clear()
   homeCache.clear()
   distroCache = undefined
+  warming.clear()
+  knownDistros = undefined
+  diagnosticsQueue = Promise.resolve()
 }

@@ -1,0 +1,37 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on windows-latest
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          node --check index.js
+          node --check client.js
+          node --check test/host.test.mjs
+      - name: Unit tests
+        shell: pwsh
+        # The real-WSL section skips itself when the runner cannot boot a distribution.
+        run: node --test
+      - name: Package contents
+        shell: pwsh
+        # Fails when files/exports drift from what the published package needs.
+        run: npm pack --dry-run

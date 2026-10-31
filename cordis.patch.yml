@@ -3,8 +3,12 @@
       name: 'dsh-wsl-folder'
       # terminal: false keeps sidebar terminals of WSL workspaces on the Windows shell.
       # write: false leaves the agent's write/edit tools exactly as DSH ships them.
-      # paths: false disables the repair of WSL paths that lost a leading separator.
+      # paths: false disables the repair of WSL paths that lost a leading separator (and the
+      # process-wide Node fs patch it installs).
+      # remote: true lets non-loopback clients call the plugin's Host routes; keep false unless
+      # a remote browser must use the WSL folder browser.
       config:
         terminal: true
         write: true
         paths: true
+        remote: false

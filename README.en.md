@@ -2,21 +2,26 @@
 
 [简体中文](README.md) | English
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin for Desktop and `dsh web` on Windows. It adds **WSL folder** to the sidebar's Add workspace button: browse a WSL distribution and add any Linux directory as a workspace in one click. Sidebar terminals of that workspace open inside the distribution, at the matching Linux path.
+[![npm](https://img.shields.io/npm/v/dsh-wsl-folder?logo=npm&label=npm)](https://www.npmjs.com/package/dsh-wsl-folder)
+[![test](https://github.com/LyuYuxin/dsh-wsl-folder/actions/workflows/test.yml/badge.svg)](https://github.com/LyuYuxin/dsh-wsl-folder/actions/workflows/test.yml)
+[![license](https://img.shields.io/npm/l/dsh-wsl-folder)](LICENSE)
+[![DSH](https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-blue)](https://github.com/deepseek-ai/deepseek-harness)
+
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) plugin for Desktop and `dsh web` on Windows. It adds **WSL folder** to the sidebar's Add workspace button: browse a WSL distribution and add any Linux directory as a workspace in one click. Sidebar terminals of that workspace open inside the distribution, at the matching Linux path. Current version: **1.1.0**.
 
 ## Screenshots
 
 **Step 1: choose where the folder is.** Windows folder keeps the system chooser; below are recent WSL locations and usage tips.
 
-![Add workspace: Windows folder or WSL folder](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-1.webp)
+![Add workspace: Windows folder or WSL folder](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.1.0/assets/screenshot-1.webp)
 
 **Step 2: browse the distribution.** Switch distributions at the top right, jump through the breadcrumb, or click the pencil to type a path; the footer shows the path that will be registered.
 
-![Select WSL Directory dialog](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-2.webp)
+![Select WSL Directory dialog](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.1.0/assets/screenshot-2.webp)
 
 **Then: sidebar terminals open inside the distribution**, titled `WSL · <distro>` and starting in the workspace.
 
-![Sidebar terminal of a WSL workspace](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.0.1/assets/screenshot-3.webp)
+![Sidebar terminal of a WSL workspace](https://raw.githubusercontent.com/LyuYuxin/dsh-wsl-folder/v1.1.0/assets/screenshot-3.webp)
 
 ## Usage
 
@@ -47,7 +52,7 @@ Tips:
 ## Requirements
 
 - Windows 10/11 with WSL (WSL2 recommended).
-- DeepSeek Harness `>= 0.2.1-rc.3` (Desktop or `dsh web`).
+- DeepSeek Harness `>= 0.2.1-rc.3` (Desktop or `dsh web`). The internal APIs were checked against the 0.2.1-rc.3 sources in this workspace, and against 0.2.1-rc.5 by `npm pack`-ing its official `@deepseek-ai/*` packages into a temporary directory and comparing the same classes/prototypes (the temporary files were deleted; no rc.5 sources are kept in the repository).
 - Nothing to install inside the distribution.
 
 ## Install
@@ -66,7 +71,8 @@ Then **quit and restart** DSH completely: the terminal redirect is installed whe
 |---|---|---|
 | `terminal` | `true` | Open sidebar terminals of WSL workspaces inside the distribution. `false` keeps DSH's default Windows shell |
 | `write` | `true` | Let the agent's write and edit tools write files on `\\wsl.localhost`. `false` keeps DSH unchanged (writes in WSL workspaces fail) |
-| `paths` | `true` | Repair WSL paths that lost their leading separator (see "Path repair" below). `false` keeps DSH unchanged |
+| `paths` | `true` | Repair WSL paths that lost their leading separator (see "Path repair" below). `false` keeps DSH unchanged and also disables the process-wide Node filesystem patch |
+| `remote` | `false` | Let non-loopback clients call the plugin's five Host routes. By default only `127.0.0.1`/`::1` peers are accepted, so when DSH's web server listens on a LAN address other machines cannot use this plugin to browse or register WSL directories; set it to `true` to allow them |
 
 Override it in your profile's `cordis.patch.yml`:
 
@@ -80,11 +86,11 @@ Override it in your profile's `cordis.patch.yml`:
 ## How it works
 
 - **Button.** DSH's workspace browser declares a directory-flow slot behind "+" (`sidebar.workspaces.directoryFlow`, and `conversation.hero.workspace.directoryFlow` on the New Session page). This plugin occupies both at a lower priority and draws its dialogs in `shell.overlay`; the Windows choice calls the very same API as DSH's native chooser.
-- **Host routes.** `GET /dsh-wsl-folder/{distros,home,list,warm}` and `POST /dsh-wsl-folder/pick` (JSON body; decides the path to register); cross-site requests are refused.
+- **Host routes.** `GET /dsh-wsl-folder/{distros,home,list,warm}` and `POST /dsh-wsl-folder/pick` (JSON body; decides the path to register). Cross-site requests are refused, and only loopback peers (`127.0.0.1`/`::1`) are accepted by default, so when the web server listens on a LAN address other machines cannot use these routes to browse directories, write the remembered-folder file or boot distributions. Set `remote: true` on the plugin row to allow them.
 - **Windows drives and fallback.** A path on a drive under the automount root (default `/mnt/`, read from `[automount] root` in `/etc/wsl.conf`) is read from the Windows path directly; any other directory the `\\wsl.localhost` share refuses is listed by `find` inside the distribution. Windows-drive folders picked from WSL are remembered in `<DSH home>/dsh-wsl-folder.json`.
 - **Terminals.** DSH's terminal controller creates sidebar terminals through `subprocess.spawnTerminal({ argv, cwd })`. Only inside that allocation (tracked with `AsyncLocalStorage`) the plugin checks `cwd`; a `\\wsl.localhost\<distro>\<path>`, or a directory inside a remembered Windows-drive folder, replaces the shell with `wsl.exe -d <distro> --cd <path>`. Unloading the plugin restores the original methods.
 - **Writes.** DSH's local filesystem (`LocalFileSystem`, which the sandboxed one extends) writes the content to a temp file beside the target and then publishes it: a new file through a hard link (failing if the target appeared meanwhile, so another creator's file is never overwritten), and on Windows an existing file through a security-descriptor copy plus `ReplaceFileW`. The plugin wraps its `writeText` / `editText`: when the target is on `\\wsl.localhost`, that one call uses an exclusive copy (which fails the same way if the target exists) and a `rename` over the file. Other paths go through untouched.
-- **Path repair.** On Windows a path starting with a single `\` is rooted on the current drive, so `\wsl.localhost\...` resolves to `C:\wsl.localhost\...`, which cannot exist — that is the error raised when a WSL workspace's `AGENTS.md` is read. DSH never produces that spelling itself, so some caller drops the leading separator; the plugin repairs it at the filesystem's one funnel, `resolve` (and `lstat`): a path of one separator plus `wsl.localhost`/`wsl$` plus an installed distribution gets the separator back, everything else passes through.
+- **Path repair.** On Windows a path starting with a single `\` is rooted on the current drive, so `\wsl.localhost\...` resolves to `C:\wsl.localhost\...`, which cannot exist — that is the error raised when a WSL workspace's `AGENTS.md` is read. DSH never produces that spelling itself, so some caller drops the leading separator; the plugin repairs it at the filesystem's one funnel, `resolve` (and `lstat`): a path of one separator plus `wsl.localhost`/`wsl$` plus an installed distribution gets the separator back, everything else passes through. A second "last mile" layer wraps a set of process-wide `node:fs` / `node:fs/promises` reads (`stat`/`lstat`/`readFile`/`readdir`/`open`/`access`/`realpath` and their sync variants) and calls `syncBuiltinESMExports()`, so components that resolved the path themselves (the sidebar document preview, for example) are repaired too. This is a **process-global side effect**: `paths: false` turns both layers, and the diagnostics log, off.
 
 ## Known limitations
 
@@ -94,15 +100,17 @@ Override it in your profile's `cordis.patch.yml`:
 - Windows folders added outside this plugin (DSH's own system chooser, for example) are not remembered, so their terminals stay on the Windows shell.
 - **Terminals of a WSL workspace always open in WSL**, even when PowerShell is chosen in the terminal menu. Set `terminal: false` for Windows shells.
 - `DSH_SESSION_ID` is not forwarded into the distribution.
-- The terminal redirect and the write repair wrap DSH internals: `TerminalController.spawn`, `spawnTerminal`, and `LocalFileSystem`'s `writeText` / `editText` with its `internals`. If DSH changes them, the affected feature falls back to DSH's own behavior (Windows shell terminals, or failing writes in WSL workspaces); adding WSL workspaces keeps working.
+- The terminal redirect and the write repair wrap DSH internals: `TerminalController.spawn`, `spawnTerminal`, and `LocalFileSystem`'s `writeText` / `editText` with its `internals`; the path repair additionally wraps process-wide Node `fs` / `fs/promises` reads. If DSH changes them, the affected feature falls back to DSH's own behavior (Windows shell terminals, or failing writes in WSL workspaces); adding WSL workspaces keeps working.
 
 ## Tests
 
 ```powershell
-node test/host.test.mjs
+node --check index.js
+node --check client.js
+node --test
 ```
 
-Pure helpers, the terminal redirect and the write repair are tested with fakes; on Windows with WSL the routes also run against the real distribution (printing timings), and new-file, no-clobber and edit writes are checked on the real 9P share.
+Dependency-free unit tests cover the pure helpers, the `/etc/wsl.conf` and registry parsers, the HTTP routes (mock `req`/`res` for method, cross-site, loopback restriction, Content-Type, JSON body limit and error mapping), the terminal redirect, the write repair, the path repair (including mounting/restoring the process-wide fs patch) and the diagnostics-log rotation. On Windows with a bootable WSL distribution a real-distribution section also exercises the routes and checks new-file, no-clobber and edit writes on the real 9P share; when WSL is unavailable that section is skipped and everything else still passes. CI runs the same commands on `windows-latest` with Node 22/24 and verifies the published file list with `npm pack --dry-run` ([workflow](.github/workflows/test.yml)).
 
 ## License
 

@@ -200,7 +200,10 @@ window.__ModuleLoader__.load({
       try { globalThis.localStorage?.setItem(key, JSON.stringify(value)) } catch { /* storage unavailable */ }
     }
     function rememberRecent(entry) {
-      const list = readJson(RECENT_KEY, []).filter((item) => !(item && item.distro === entry.distro && item.path === entry.path))
+      const stored = readJson(RECENT_KEY, [])
+      const list = (Array.isArray(stored) ? stored : [])
+        .filter((item) => item && typeof item.distro === 'string' && typeof item.path === 'string')
+        .filter((item) => !(item.distro === entry.distro && item.path === entry.path))
       list.unshift({ distro: entry.distro, path: entry.path })
       writeJson(RECENT_KEY, list.slice(0, 5))
       writeJson(DISTRO_KEY, entry.distro)
@@ -242,7 +245,7 @@ window.__ModuleLoader__.load({
       return getJson('distros', {}, signal).then((r) => { cache.distros = Array.isArray(r.distros) ? r.distros : []; return cache.distros })
     }
     function fetchHome(distro, signal) {
-      if (cache.homes.has(distro)) return Promise.resolve(cache.homes.get(distro))
+      // Always revalidate: a distribution's default user (and so its home) can change between runs.
       return getJson('home', { distro }, signal).then((r) => { const home = r.home || '/'; cache.homes.set(distro, home); return home })
     }
     function fetchList(distro, path, signal) {
@@ -382,7 +385,11 @@ window.__ModuleLoader__.load({
     function ChooseDialog({ t, busy, nativeError, onWindows, onWsl, onRecent, onCancel }) {
       const cardRef = React.useRef(null)
       const firstRef = React.useRef(null)
-      const recents = React.useMemo(() => readJson(RECENT_KEY, []).filter((item) => item && typeof item.distro === 'string' && typeof item.path === 'string'), [])
+      const recents = React.useMemo(() => {
+        const stored = readJson(RECENT_KEY, [])
+        return (Array.isArray(stored) ? stored : [])
+          .filter((item) => item && typeof item.distro === 'string' && typeof item.path === 'string')
+      }, [])
       React.useEffect(() => { prefetch(); (firstRef.current || cardRef.current)?.focus() }, [])
       const item = (key, icon, title, sub, onClick, ref) => h('button', {
         key, ref, type: 'button', className: 'dwf-item', onClick, disabled: busy,
