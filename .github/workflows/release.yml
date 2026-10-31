@@ -1,0 +1,37 @@
+name: release
+
+# Tag push creates the GitHub Release from the curated notes in
+# .github/release-notes/<tag>.md. The notes live in the repository so the
+# release text is reviewable before the tag exists, and no personal access
+# token is needed: the workflow's own GITHUB_TOKEN can create releases.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish release for ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          notes=".github/release-notes/${TAG}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::missing release notes: $notes"
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "$notes" \
+            --verify-tag
